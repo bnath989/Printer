@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ปริ้นบลูทูธ</title>
+<style>
+  :root{--bg:#f6f7f5;--ink:#1c2420;--mut:#66726b;--line:#d9dfdb;--acc:#0f7a5a;--card:#fff;--err:#b3261e}
+  @media (prefers-color-scheme:dark){:root{--bg:#141815;--ink:#e8eee9;--mut:#93a09a;--line:#2b342f;--acc:#3fcf9f;--card:#1b211d;--err:#ff8a80}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Noto Sans Thai","Sarabun",system-ui,sans-serif;padding:16px;max-width:560px;margin-inline:auto}
+  h1{font-size:20px;margin:4px 0 12px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+  label{display:block;font-size:14px;color:var(--mut);margin:8px 0 4px}
+  input,textarea,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:inherit}
+  textarea{min-height:110px}
+  .row{display:flex;gap:8px}.row>*{flex:1}
+  button{width:100%;padding:13px;border:0;border-radius:8px;background:var(--acc);color:#fff;font:inherit;font-weight:600;margin-top:10px}
+  button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
+  button:disabled{opacity:.45}
+  #status{font-size:14px;color:var(--mut);min-height:22px}
+  #status.err{color:var(--err)}
+  canvas{max-width:100%;border:1px dashed var(--line);margin-top:10px;background:#fff}
+  small{color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>ปริ้นไปเครื่องบลูทูธ</h1>
+
+<section>
+  <div id="status">ยังไม่ได้เชื่อมต่อ</div>
+  <button id="btnConnect">เชื่อมต่อเครื่องปริ้น</button>
+  <small>ใช้ได้กับ Chrome บน Android เท่านั้น (iPhone ไม่รองรับ) · ชื่อเครื่อง QR380A-ED57</small>
+</section>
+
+<section>
+  <div class="row">
+    <div><label>กว้าง (mm)</label><input id="wmm" type="number" value="76"></div>
+    <div><label>สูง (mm)</label><input id="hmm" type="number" value="130"></div>
+    <div><label>ขนาดตัวอักษร</label><input id="fs" type="number" value="36"></div>
+  </div>
+  <label>ข้อความที่จะปริ้น (ภาษาไทยได้)</label>
+  <textarea id="txt">ทดสอบปริ้น
+สวัสดี 123456</textarea>
+  <label>หรือเลือกรูป / ใบปะหน้า</label>
+  <input id="file" type="file" accept="image/*">
+  <canvas id="prev"></canvas>
+  <button id="btnPrev" class="sec">ดูตัวอย่าง</button>
+  <button id="btnPrint" disabled>ปริ้น</button>
+</section>
+
+<script>
+const DPI_DOTS_PER_MM = 8;               // 203 dpi
+const $ = id => document.getElementById(id);
+let char = null, device = null, srcImage = null;
+
+// UUID ที่เครื่องปริ้นความร้อนบลูทูธ BLE ใช้บ่อย (ไม่รู้ตัวไหนจะค้นหาให้อัตโนมัติ)
+const SERVICES = [
+  '0000ff00-0000-1000-8000-00805f9b34fb',
+  '0000ffe0-0000-1000-8000-00805f9b34fb',
+  '000018f0-0000-1000-8000-00805f9b34fb',
+  '49535343-fe7d-4ae5-8fa9-9fafd205e455',
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2',
+  '0000fee7-0000-1000-8000-00805f9b34fb'
+];
+
+function setStatus(t, err){ $('status').textContent = t; $('status').className = err ? 'err' : ''; }
+
+async function connect(){
+  if(!navigator.bluetooth){ setStatus('เบราว์เซอร์นี้ไม่รองรับ Web Bluetooth — ใช้ Chrome บน Android และเปิดผ่าน https', true); return; }
+  try{
+    device = await navigator.bluetooth.requestDevice({
+      filters:[{namePrefix:'QR380'},{namePrefix:'QR'}],
+      optionalServices: SERVICES
+    });
+    device.addEventListener('gattserverdisconnected', ()=>{ char=null; $('btnPrint').disabled=true; setStatus('หลุดการเชื่อมต่อ กดเชื่อมต่อใหม่', true); });
+    setStatus('กำลังเชื่อมต่อ...');
+    const server = await device.gatt.connect();
+    char = await findWritable(server);
+    if(!char) throw new Error('ไม่พบช่องเขียนข้อมูลของเครื่องปริ้น');
+    $('btnPrint').disabled = false;
+    setStatus('เชื่อมต่อแล้ว: ' + device.name);
+  }catch(e){ setStatus('เชื่อมต่อไม่สำเร็จ: ' + e.message, true); }
+}
+
+async function findWritable(server){
+  const services = await server.getPrimaryServices();
+  for(const s of services){
+    const chars = await s.getCharacteristics();
+    for(const c of chars){
+      if(c.properties.write || c.properties.writeWithoutResponse) return c;
+    }
+  }
+  return null;
+}
+
+async function sendBytes(bytes){
+  const CHUNK = 100;
+  for(let i=0;i<bytes.length;i+=CHUNK){
+    const part = bytes.slice(i,i+CHUNK);
+    if(char.properties.writeWithoutResponse) await char.writeValueWithoutResponse(part);
+    else await char.writeValue(part);
+    await new Promise(r=>setTimeout(r,12));
+  }
+}
+
+// วาดข้อความ/รูปลง canvas ขนาดตามกระดาษ
+function render(){
+  const w = Math.round($('wmm').value * DPI_DOTS_PER_MM / 8) * 8;   // กว้างต้องหาร 8 ลงตัว
+  const h = Math.round($('hmm').value * DPI_DOTS_PER_MM);
+  const cv = $('prev'); cv.width = w; cv.height = h;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0,0,w,h);
+  if(srcImage){
+    const r = Math.min(w/srcImage.width, h/srcImage.height);
+    g.drawImage(srcImage, 0, 0, srcImage.width*r, srcImage.height*r);
+  }else{
+    const fs = +$('fs').value; g.fillStyle='#000';
+    g.font = `bold ${fs}px "Noto Sans Thai","Sarabun",sans-serif`; g.textBaseline='top';
+    let y = 10;
+    for(const line of $('txt').value.split('\n')){
+      // ตัดบรรทัดอัตโนมัติ
+      let cur='';
+      for(const ch of line){
+        if(g.measureText(cur+ch).width > w-20){ g.fillText(cur,10,y); y+=fs*1.4; cur=ch; } else cur+=ch;
+      }
+      g.fillText(cur,10,y); y+=fs*1.4;
+    }
+  }
+  return cv;
+}
+
+function toTSPL(cv){
+  const w = cv.width, h = cv.height, wb = w/8;
+  const px = cv.getContext('2d').getImageData(0,0,w,h).data;
+  const bmp = new Uint8Array(wb*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const i=(y*w+x)*4, lum=0.3*px[i]+0.59*px[i+1]+0.11*px[i+2];
+    const white = lum > 150;
+    if(white) bmp[y*wb + (x>>3)] |= (0x80 >> (x&7));   // TSPL: bit 1 = ขาว, 0 = ดำ
+  }
+  const enc = new TextEncoder();
+  const head = enc.encode(`SIZE ${$('wmm').value} mm,${$('hmm').value} mm\r\nGAP 2 mm,0 mm\r\nDIRECTION 1\r\nCLS\r\nBITMAP 0,0,${wb},${h},0,`);
+  const tail = enc.encode('\r\nPRINT 1,1\r\n');
+  const out = new Uint8Array(head.length+bmp.length+tail.length);
+  out.set(head,0); out.set(bmp,head.length); out.set(tail,head.length+bmp.length);
+  return out;
+}
+
+async function printCanvas(cv){
+  if(!char){ setStatus('ยังไม่ได้เชื่อมต่อเครื่องปริ้น', true); return; }
+  try{ setStatus('กำลังปริ้น...'); await sendBytes(toTSPL(cv)); setStatus('ส่งปริ้นแล้ว'); }
+  catch(e){ setStatus('ปริ้นไม่สำเร็จ: ' + e.message, true); }
+}
+
+$('btnConnect').onclick = connect;
+$('btnPrev').onclick = render;
+$('btnPrint').onclick = () => printCanvas(render());
+$('file').onchange = e => {
+  const f = e.target.files[0]; if(!f){ srcImage=null; return; }
+  const img = new Image(); img.onload = ()=>{ srcImage=img; render(); }; img.src = URL.createObjectURL(f);
+};
+render();
+
+// ให้เว็บอื่น/สคริปต์เรียกใช้: BTPrinter.print(canvas)
+window.BTPrinter = { connect, print: printCanvas };
+</script>
+</body>
+</html>
