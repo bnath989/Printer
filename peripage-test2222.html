@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ทดสอบ PeriPage v2</title>
+<style>
+  :root{--bg:#f6f7f5;--ink:#1c2420;--mut:#66726b;--line:#d9dfdb;--acc:#0f7a5a;--card:#fff;--err:#b3261e}
+  @media (prefers-color-scheme:dark){:root{--bg:#141815;--ink:#e8eee9;--mut:#93a09a;--line:#2b342f;--acc:#3fcf9f;--card:#1b211d;--err:#ff8a80}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Noto Sans Thai","Sarabun",system-ui,sans-serif;padding:16px;max-width:560px;margin-inline:auto}
+  h1{font-size:20px;margin:4px 0 12px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+  label{display:block;font-size:14px;color:var(--mut);margin:8px 0 4px}
+  select{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:inherit}
+  button{width:100%;padding:13px;border:0;border-radius:8px;background:var(--acc);color:#fff;font:inherit;font-weight:600;margin-top:8px}
+  button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
+  button:disabled{opacity:.45}
+  textarea{width:100%;min-height:260px;padding:10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:12px/1.4 monospace}
+  #st{font-size:14px;color:var(--mut)} #st.err{color:var(--err)}
+  small{color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>ทดสอบ PeriPage A6 (v2)</h1>
+
+<section>
+  <div id="st">ยังไม่ได้เชื่อมต่อ</div>
+  <button id="bScan">1) ค้นหาและเชื่อมต่อ</button>
+  <button id="bAuto" disabled>2) ลองทุกแบบอัตโนมัติ</button>
+  <button id="bStop" class="sec" disabled>หยุด</button>
+  <small>กด 2 แล้วรอ เครื่องจะปริ้นชิ้นเล็กๆ ที่มีเลข #1 #2 #3 ... ออกมาทีละแบบ จดเลขที่ปริ้นออกจริง</small>
+</section>
+
+<section>
+  <b>ลองเองทีละแบบ</b>
+  <label>ช่องเขียนข้อมูล</label><select id="selChar"></select>
+  <label>รูปแบบคำสั่ง</label>
+  <select id="selVar">
+    <option value="text">ข้อความธรรมดา (ESC/POS)</option>
+    <option value="gsv0">รูปภาพ GS v 0</option>
+    <option value="phomemo">รูปภาพ แบบ Phomemo</option>
+    <option value="peri">รูปภาพ แบบ PeriPage (เดา)</option>
+  </select>
+  <label>ขนาดชุดข้อมูล (ไบต์)</label>
+  <select id="selChunk"><option>20</option><option>100</option><option>180</option></select>
+  <button id="bOne" class="sec" disabled>ปริ้นทดสอบแบบนี้</button>
+</section>
+
+<section>
+  <b>ผลที่ได้ (ส่งภาพหน้าจอส่วนนี้ให้ผม)</b>
+  <textarea id="rep" readonly></textarea>
+  <button id="bCopy" class="sec">คัดลอกผล</button>
+</section>
+
+<script>
+const SERVICES = [
+  '0000ff00-0000-1000-8000-00805f9b34fb','0000ffe0-0000-1000-8000-00805f9b34fb',
+  '000018f0-0000-1000-8000-00805f9b34fb','49535343-fe7d-4ae5-8fa9-9fafd205e455',
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2','0000fee7-0000-1000-8000-00805f9b34fb',
+  '0000ae30-0000-1000-8000-00805f9b34fb','0000af30-0000-1000-8000-00805f9b34fb',
+  '0000ff12-0000-1000-8000-00805f9b34fb','0000fff0-0000-1000-8000-00805f9b34fb',
+  '00001800-0000-1000-8000-00805f9b34fb','0000180a-0000-1000-8000-00805f9b34fb'
+];
+const PROPS = ['read','write','writeWithoutResponse','notify','indicate'];
+const VARIANTS = ['text','gsv0','phomemo','peri'];
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const lines = [];
+let dev = null, writable = [], stop = false;
+
+function log(t){ lines.push(t); $('rep').value = lines.join('\n'); $('rep').scrollTop = 1e9; }
+function st(t, err){ $('st').textContent = t; $('st').className = err ? 'err' : ''; }
+const props = c => PROPS.filter(k => c.properties[k]).join(',');
+const short = u => /^0000....-0000-1000/.test(u) ? u.slice(4,8) : u.slice(0,8);
+const hex = dv => Array.from(new Uint8Array(dv.buffer)).map(b => b.toString(16).padStart(2,'0')).join(' ');
+
+$('bScan').onclick = async () => {
+  lines.length = 0; writable = []; ['bAuto','bOne'].forEach(i => $(i).disabled = true);
+  if(!navigator.bluetooth){ st('เบราว์เซอร์นี้ไม่รองรับ Web Bluetooth', true); return; }
+  try{
+    dev = await navigator.bluetooth.requestDevice({
+      filters: [{namePrefix:'PeriPage'},{namePrefix:'Peri'}], optionalServices: SERVICES
+    });
+    log('อุปกรณ์: ' + dev.name);
+    st('กำลังเชื่อมต่อ...');
+    const server = await dev.gatt.connect();
+    const services = await server.getPrimaryServices();
+    for(const s of services){
+      log('SERVICE ' + short(s.uuid));
+      for(const c of await s.getCharacteristics()){
+        log('  CHAR ' + short(c.uuid) + ' [' + props(c) + ']');
+        if(c.properties.write || c.properties.writeWithoutResponse) writable.push({c, svc: short(s.uuid)});
+        if(c.properties.notify || c.properties.indicate){
+          try{
+            await c.startNotifications();
+            c.addEventListener('characteristicvaluechanged', e => log('  ← ' + short(c.uuid) + ': ' + hex(e.target.value)));
+            log('  (เปิดรับการแจ้งเตือนจาก ' + short(c.uuid) + ')');
+          }catch(e){ log('  แจ้งเตือน ' + short(c.uuid) + ' ไม่ได้: ' + e.message); }
+        }
+      }
+    }
+    dev.addEventListener('gattserverdisconnected', () => { st('หลุดการเชื่อมต่อ', true); log('หลุดการเชื่อมต่อ'); });
+    // เรียงให้ ff02 ขึ้นก่อน
+    writable.sort((a,b) => (b.c.uuid.includes('ff02')?1:0) - (a.c.uuid.includes('ff02')?1:0));
+    $('selChar').innerHTML = writable.map((w,i) => `<option value="${i}">${w.svc} / ${short(w.c.uuid)} [${props(w.c)}]</option>`).join('');
+    if(writable.length){ ['bAuto','bOne'].forEach(i => $(i).disabled = false); st('เชื่อมต่อแล้ว: ' + dev.name + ' · ช่องเขียน ' + writable.length + ' ช่อง'); }
+    else st('เชื่อมต่อได้ แต่ไม่พบช่องเขียนข้อมูล', true);
+  }catch(e){ log('ERROR: ' + e.name + ' — ' + e.message); st('ไม่สำเร็จ: ' + e.message, true); }
+};
+
+async function write(c, bytes, chunk){
+  let i = 0;
+  const noResp = c.properties.writeWithoutResponse;
+  while(i < bytes.length){
+    const part = bytes.slice(i, i + chunk);
+    try{
+      if(noResp) await c.writeValueWithoutResponse(part); else await c.writeValueWithResponse(part);
+      i += part.length; await sleep(6);
+    }catch(e){
+      if(/in progress|busy/i.test(e.message)){ await sleep(20); continue; }
+      if(chunk > 20){ chunk = 20; await sleep(100); continue; }
+      throw e;
+    }
+  }
+}
+
+function concat(...arrs){
+  const parts = arrs.map(a => a instanceof Uint8Array ? a : new Uint8Array(a));
+  const out = new Uint8Array(parts.reduce((n,a) => n + a.length, 0)); let o = 0;
+  parts.forEach(a => { out.set(a, o); o += a.length; });
+  return out;
+}
+
+function raster(k){
+  const W = 384, H = 96, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0,0,W,H);
+  g.strokeStyle = '#000'; g.lineWidth = 4; g.strokeRect(3,3,W-6,H-6);
+  g.fillStyle = '#000'; g.textBaseline = 'middle';
+  g.font = 'bold 56px sans-serif'; g.fillText('#' + k, 18, H/2);
+  g.font = '28px "Noto Sans Thai",sans-serif'; g.fillText('ทดสอบ BN', 150, H/2);
+  const px = g.getImageData(0,0,W,H).data, wb = W/8, data = new Uint8Array(wb*H);
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=(y*W+x)*4; if(0.3*px[i]+0.59*px[i+1]+0.11*px[i+2] < 150) data[y*wb+(x>>3)] |= (0x80 >> (x&7)); // 1 = ดำ
+  }
+  return {wb, H, data};
+}
+
+function build(variant, k){
+  const enc = new TextEncoder();
+  if(variant === 'text') return concat([0x1b,0x40], enc.encode('#' + k + ' TEST PERIPAGE\n\n\n\n'));
+  const r = raster(k);
+  const gs = [0x1d,0x76,0x30,0x00, r.wb & 255, r.wb >> 8, r.H & 255, r.H >> 8];
+  if(variant === 'gsv0')    return concat([0x1b,0x40], gs, r.data, [0x0a,0x0a,0x0a]);
+  if(variant === 'phomemo') return concat([0x1b,0x40,0x1b,0x61,0x01,0x1f,0x11,0x02,0x04], gs, r.data, [0x1b,0x64,0x02,0x1b,0x64,0x02]);
+  if(variant === 'peri')    return concat([0x10,0xff,0xfe,0x01], gs, r.data, [0x1b,0x4a,0x40]);
+}
+
+$('bOne').onclick = async () => {
+  const w = writable[+$('selChar').value], v = $('selVar').value, chunk = +$('selChunk').value;
+  try{
+    const bytes = build(v, 0);
+    log('ส่ง ' + short(w.c.uuid) + ' / ' + v + ' / ชุด ' + chunk + ' · ' + bytes.length + ' ไบต์');
+    await write(w.c, bytes, chunk);
+    log('  ส่งเสร็จ ดูว่าเครื่องปริ้นอะไรออกมา');
+  }catch(e){ log('  ผิดพลาด: ' + e.message); }
+};
+
+$('bAuto').onclick = async () => {
+  stop = false; $('bStop').disabled = false; $('bAuto').disabled = true;
+  let k = 0;
+  log('--- เริ่มลองทุกแบบ (ชุด 20 ไบต์) ---');
+  try{
+    for(const w of writable){
+      for(const v of VARIANTS){
+        if(stop) throw new Error('หยุดโดยผู้ใช้');
+        k++;
+        log('#' + k + ' = ' + w.svc + '/' + short(w.c.uuid) + ' / ' + v);
+        st('กำลังส่งแบบที่ #' + k + '...');
+        try{ await write(w.c, build(v, k), 20); }catch(e){ log('   ผิดพลาด: ' + e.message); }
+        await sleep(3500);
+      }
+    }
+    log('--- จบ จดเลข # ที่เครื่องปริ้นออกมาจริงแล้วส่งให้ผม ---');
+    st('ลองครบแล้ว ดูว่าเลขไหนออกมา');
+  }catch(e){ log(e.message); st(e.message, true); }
+  $('bStop').disabled = true; $('bAuto').disabled = false;
+};
+$('bStop').onclick = () => { stop = true; };
+
+$('bCopy').onclick = async () => {
+  try{ await navigator.clipboard.writeText($('rep').value); st('คัดลอกแล้ว'); }catch(e){ $('rep').select(); }
+};
+</script>
+</body>
+</html>
